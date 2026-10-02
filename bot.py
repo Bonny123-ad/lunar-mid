@@ -206,7 +206,7 @@ class PapeisView(discord.ui.View):
 
 class ValorModal(discord.ui.Modal, title="Propor valor da negociação"):
     valor = discord.ui.TextInput(label="Valor combinado (R$)", placeholder="Ex.: 50,00", max_length=15)
-    modalidade = discord.ui.TextInput(label="Tipo (produto ou conta)", placeholder="produto", default="produto", max_length=15, required=True)
+    modalidade = discord.ui.TextInput(label="O que está sendo negociado?", placeholder="Ex.: conta Brawl Stars, skin, gift card...", default="Produto", max_length=60, required=True)
 
     def __init__(self, canal_id: int):
         super().__init__()
@@ -223,9 +223,9 @@ class ValorModal(discord.ui.Modal, title="Propor valor da negociação"):
                 raise InvalidOperation
         except (InvalidOperation, ValueError):
             return await interaction.response.send_message("Digite um valor válido, por exemplo `50,00`.", ephemeral=True)
-        modalidade = str(self.modalidade.value).strip().lower()
-        if modalidade not in ("produto", "conta"):
-            return await interaction.response.send_message("O tipo precisa ser `produto` ou `conta`.", ephemeral=True)
+        modalidade = " ".join(str(self.modalidade.value).strip().split())
+        if not modalidade:
+            return await interaction.response.send_message("Informe o que está sendo negociado.", ephemeral=True)
         estado.valor = valor
         estado.modalidade = modalidade
         estado.confirmacoes.clear()
@@ -242,7 +242,7 @@ class ValorModal(discord.ui.Modal, title="Propor valor da negociação"):
                     f"**Taxa estimada:** {dinheiro(taxa)}\n"
                     f"**Total com taxa:** {dinheiro(total)}\n\n"
                     f"**Confirmações:** <@{estado.criador_id}> ⏳ • <@{estado.participante_id}> ⏳\n"
-                    "Ambos devem clicar em **Confirmar valor**. Editar a proposta reinicia as confirmações.",
+                    "Ambos devem clicar em **Confirmar valor**. Ao confirmar, o ⏳ vira ✅. Editar a proposta reinicia as confirmações.",
                 ),
                 view=ConfirmarValorView(self.canal_id),
             )
@@ -275,7 +275,26 @@ class ConfirmarValorView(discord.ui.View):
         if interaction.user.id not in (estado.criador_id, estado.participante_id):
             return await interaction.response.send_message("Só os participantes podem confirmar.", ephemeral=True)
         estado.confirmacoes.add(interaction.user.id)
-        await interaction.response.send_message("Sua confirmação foi registrada.", ephemeral=True)
+        await interaction.response.send_message("✅ Sua confirmação foi registrada!", ephemeral=True)
+        canal = interaction.guild.get_channel(self.canal_id) if interaction.guild else None
+        if isinstance(canal, discord.TextChannel) and interaction.message:
+            taxa_atual = calcular_taxa(estado.valor, estado.modalidade)
+            status_a = "✅ Confirmado" if estado.criador_id in estado.confirmacoes else "⏳ Aguardando"
+            status_b = "✅ Confirmado" if estado.participante_id in estado.confirmacoes else "⏳ Aguardando"
+            embed_status = embed_base(
+                "🌙 Lunar MID • Confirmação da proposta",
+                f"**O que está sendo negociado:** {estado.modalidade}\n"
+                f"**Valor combinado:** {dinheiro(estado.valor)}\n"
+                f"**Taxa da mediação:** {dinheiro(taxa_atual)}\n"
+                f"**Total com taxa:** {dinheiro(estado.valor + taxa_atual)}\n\n"
+                f"**{interaction.guild.get_member(estado.criador_id).display_name if interaction.guild.get_member(estado.criador_id) else 'Participante 1'}:** {status_a}\n"
+                f"**{interaction.guild.get_member(estado.participante_id).display_name if interaction.guild.get_member(estado.participante_id) else 'Participante 2'}:** {status_b}\n\n"
+                "A confirmação registra apenas o acordo sobre os valores; não comprova pagamento."
+            )
+            try:
+                await interaction.message.edit(embed=embed_status, view=self)
+            except discord.HTTPException:
+                pass
         if estado.criador_id in estado.confirmacoes and estado.participante_id in estado.confirmacoes:
             estado.etapa = "negociacao"
             canal = interaction.guild.get_channel(self.canal_id) if interaction.guild else None
@@ -283,10 +302,11 @@ class ConfirmarValorView(discord.ui.View):
                 taxa = calcular_taxa(estado.valor, estado.modalidade)
                 await canal.send(
                     embed=embed_base(
-                        "Valor confirmado pelas duas partes",
-                        f"**Valor:** {dinheiro(estado.valor)}\n**Taxa:** {dinheiro(taxa)}\n"
-                        f"**Total:** {dinheiro(estado.valor + taxa)}\n\n"
-                        "As duas partes confirmaram a proposta. A partir daqui, continuem a negociação neste ticket. "
+                        "✅ Valor confirmado pelas duas partes",
+                        f"**O que está sendo negociado:** {estado.modalidade}\n"
+                        f"**Valor:** {dinheiro(estado.valor)}\n**Taxa da mediação:** {dinheiro(taxa)}\n"
+                        f"**Total com taxa:** {dinheiro(estado.valor + taxa)}\n\n"
+                        "✅ As duas partes confirmaram a proposta. Continuem a negociação neste ticket. "
                         "A confirmação do valor **não significa que houve pagamento**.",
                     ),
                     view=EtapasManuaisView(self.canal_id),
@@ -373,6 +393,14 @@ async def painelmid(interaction: discord.Interaction):
         "• Definam os papéis e o valor\n"
         "• Ambos confirmam a proposta\n"
         "• Sigam as etapas manualmente dentro do ticket\n\n"
+        "**Tabela de taxas da mediação**\n"
+        "• Até R$ 2,50: **R$ 0,00**\n"
+        "• R$ 2,51 a R$ 100,00: **R$ 1,20**\n"
+        "• R$ 100,01 a R$ 200,00: **R$ 2,50**\n"
+        "• R$ 200,01 a R$ 400,00: **R$ 5,00**\n"
+        "• R$ 400,01 a R$ 700,00: **R$ 8,00**\n"
+        "• Acima de R$ 700,00: **1,2% do valor**\n"
+        "• Para negociações identificadas como **conta**, a regra antiga de 5% extra não é mais aplicada automaticamente; o campo aceita qualquer descrição e usa a tabela acima.\n\n"
         "⚠️ Confirmações manuais não comprovam pagamentos. Não compartilhe senhas, códigos de autenticação ou dados bancários no ticket.",
     )
     await interaction.response.send_message("Painel publicado.", ephemeral=True)
