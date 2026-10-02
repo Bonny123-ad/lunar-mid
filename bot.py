@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
@@ -80,7 +81,14 @@ class AbrirTicketView(discord.ui.View):
         if categoria is not None and not isinstance(categoria, discord.CategoryChannel):
             categoria = None
 
-        nome = f"mid-{interaction.user.name}".lower().replace(" ", "-")[:90]
+        # Numeracao sequencial baseada nos tickets MID ja existentes no servidor.
+        numeros_existentes = []
+        for canal_existente in guild.text_channels:
+            correspondencia = re.fullmatch(r"mid-(\d+)", canal_existente.name)
+            if correspondencia:
+                numeros_existentes.append(int(correspondencia.group(1)))
+        numero_ticket = max(numeros_existentes, default=0) + 1
+        nome = f"mid-{numero_ticket:03d}"
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
@@ -191,7 +199,7 @@ class PapeisView(discord.ui.View):
             estado.etapa = "valor"
             canal = interaction.guild.get_channel(estado.canal_id) if interaction.guild else None
             if isinstance(canal, discord.TextChannel):
-                # O botão de assumir fica num canal separado, não visível aos participantes.
+                # Publica o aviso e botão no canal de MID configurado.
                 canal_midleman = interaction.guild.get_channel(MIDLEMAN_CHANNEL_ID) if MIDLEMAN_CHANNEL_ID else None
                 if isinstance(canal_midleman, discord.TextChannel):
                     try:
@@ -463,7 +471,7 @@ async def midajuda(interaction: discord.Interaction):
             "Ajuda • Lunar MID",
             "Use `/painelmid` (permissão Gerenciar Servidor) para publicar o painel.\n"
             "Configure `TICKET_CATEGORY_ID`, `STAFF_ROLE_ID`, `MIDLEMAN_ROLE_ID`, `MIDLEMAN_CHANNEL_ID` e `LOG_CHANNEL_ID` na hospedagem. `MIDLEMAN_ROLE_ID` é o ID do cargo; `MIDLEMAN_CHANNEL_ID` é o ID do canal privado visível apenas para Midleman.\n"
-            "O bot não processa pagamentos nem verifica PIX automaticamente nesta versão.",
+            "Os avisos/botão de assumir mediação são publicados no canal MID configurado por MIDLEMAN_CHANNEL_ID. Tickets recebem nomes sequenciais como mid-001, mid-002, mid-003, conforme os canais MID existentes. O bot não processa pagamentos nem verifica PIX automaticamente nesta versão.",
         ),
         ephemeral=True,
     )
