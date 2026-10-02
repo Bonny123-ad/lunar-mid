@@ -370,9 +370,19 @@ class FormularioNegociacao(
                     "o pagamento. Não considere a negociação paga até "
                     "que o status seja verificado diretamente na PurinCash."
                 )
-
         except (aiohttp.ClientError, TimeoutError, RuntimeError) as erro:
-            print(f"Erro na integração PurinCash: {erro}")
+            print(
+                f"ERRO PURINCASH: {erro!r}\n{traceback.format_exc()}",
+                flush=True,
+            )
+
+            await canal.send(
+                "⚠️ Não consegui confirmar a criação da cobrança PIX.\n"
+                "Não tente pagar por um código antigo nem considere a "
+                "cobrança criada sem verificar o painel da PurinCash."
+            )
+
+
 
             await canal.send(
                 "⚠️ Não consegui confirmar a criação da cobrança PIX. "
