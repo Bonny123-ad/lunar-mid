@@ -14,6 +14,8 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0") or 0)
 STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0") or 0)
+MIDLEMAN_ROLE_ID = int(os.getenv("MIDLEMAN_ROLE_ID", "1553573537506394192") or 1553573537506394192)
+MIDLEMAN_CHANNEL_ID = int(os.getenv("MIDLEMAN_CHANNEL_ID", "0") or 0)
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or 0)
 
 logging.basicConfig(level=logging.INFO)
@@ -189,6 +191,22 @@ class PapeisView(discord.ui.View):
             estado.etapa = "valor"
             canal = interaction.guild.get_channel(estado.canal_id) if interaction.guild else None
             if isinstance(canal, discord.TextChannel):
+                # O botão de assumir fica num canal separado, não visível aos participantes.
+                canal_midleman = interaction.guild.get_channel(MIDLEMAN_CHANNEL_ID) if MIDLEMAN_CHANNEL_ID else None
+                if isinstance(canal_midleman, discord.TextChannel):
+                    try:
+                        await canal_midleman.send(
+                            embed=embed_base(
+                                "🛡️ Nova mediação aguardando Midleman",
+                                f"Ticket: {canal.mention}\nParticipantes: <@{estado.criador_id}> e <@{estado.participante_id}>\n\n"
+                                "Somente membros com o cargo Midleman devem usar o botão abaixo."
+                            ),
+                            view=AssumirMidlemanView(self.canal_id),
+                        )
+                    except discord.HTTPException:
+                        await canal.send("⚠️ Não consegui avisar o canal privado de Midleman. Avise a equipe.")
+                else:
+                    await canal.send("⚠️ O canal privado de Midleman não está configurado. Configure MIDLEMAN_CHANNEL_ID na FadeHost.")
                 await canal.send(
                     embed=embed_base("Confirmar valor", "Informe o valor combinado. Os dois participantes terão que confirmar."),
                     view=ProporValorView(self.canal_id),
@@ -202,6 +220,37 @@ class PapeisView(discord.ui.View):
     @discord.ui.button(label="Recebendo", style=discord.ButtonStyle.secondary, emoji="📥", custom_id="lunar_mid:recebendo")
     async def recebendo(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.escolher(interaction, "Recebendo")
+
+
+class AssumirMidlemanView(discord.ui.View):
+    def __init__(self, canal_id: int):
+        super().__init__(timeout=86400)
+        self.canal_id = canal_id
+
+    @discord.ui.button(label="Assumir mediação", style=discord.ButtonStyle.primary, emoji="🛡️", custom_id="lunar_mid:assumir_midleman")
+    async def assumir(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Use este botão dentro do servidor.", ephemeral=True)
+        if not MIDLEMAN_ROLE_ID:
+            return await interaction.response.send_message("O cargo ainda não foi configurado. Adicione o ID do cargo em MIDLEMAN_ROLE_ID na FadeHost.", ephemeral=True)
+        cargo = interaction.guild.get_role(MIDLEMAN_ROLE_ID)
+        if cargo is None or cargo not in interaction.user.roles:
+            return await interaction.response.send_message("🔒 Apenas membros com o cargo **Midleman** podem usar este botão.", ephemeral=True)
+        estado = ESTADOS.get(self.canal_id)
+        if not estado:
+            return await interaction.response.send_message("Não encontrei uma negociação ativa neste ticket.", ephemeral=True)
+        canal = interaction.guild.get_channel(self.canal_id)
+        if not isinstance(canal, discord.TextChannel):
+            return await interaction.response.send_message("Canal do ticket não encontrado.", ephemeral=True)
+        await canal.set_permissions(interaction.user, view_channel=True, send_messages=True, read_message_history=True)
+        await interaction.response.send_message("✅ Você assumiu a mediação deste ticket.", ephemeral=True)
+        await canal.send(embed=embed_base("🛡️ Midleman responsável", f"{interaction.user.mention} assumiu a mediação. As etapas e confirmações continuam manuais."))
+        await registrar(interaction.guild, f"🛡️ {interaction.user.mention} assumiu a mediação em {canal.mention}.")
+        button.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
 
 
 class ValorModal(discord.ui.Modal, title="Propor valor da negociação"):
@@ -413,7 +462,7 @@ async def midajuda(interaction: discord.Interaction):
         embed=embed_base(
             "Ajuda • Lunar MID",
             "Use `/painelmid` (permissão Gerenciar Servidor) para publicar o painel.\n"
-            "Configure `TICKET_CATEGORY_ID`, `STAFF_ROLE_ID` e `LOG_CHANNEL_ID` como variáveis opcionais na hospedagem.\n"
+            "Configure `TICKET_CATEGORY_ID`, `STAFF_ROLE_ID`, `MIDLEMAN_ROLE_ID`, `MIDLEMAN_CHANNEL_ID` e `LOG_CHANNEL_ID` na hospedagem. `MIDLEMAN_ROLE_ID` é o ID do cargo; `MIDLEMAN_CHANNEL_ID` é o ID do canal privado visível apenas para Midleman.\n"
             "O bot não processa pagamentos nem verifica PIX automaticamente nesta versão.",
         ),
         ephemeral=True,
