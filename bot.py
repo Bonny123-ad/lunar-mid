@@ -53,39 +53,81 @@ def calcular_taxa(valor, modalidade):
 
 
 async def criar_cobranca_pix(valor_total, descricao):
+    import logging
+
+    logger = logging.getLogger("lunar_mid")
+
     if not PURINCASH_API_KEY:
+        logger.error("PURINCASH_API_KEY não está configurada na hospedagem.")
         raise RuntimeError("A chave da PurinCash não está configurada.")
 
     url = f"{PURINCASH_BASE_URL}/v1/charges"
-
     headers = {
         "Authorization": f"Bearer {PURINCASH_API_KEY}",
         "Content-Type": "application/json",
     }
-
     dados = {
         "valueCents": para_centavos(valor_total),
-        "description": descricao[:200],
+        "description": str(descricao)[:200],
     }
 
+    logger.info(
+        "Solicitando cobrança PurinCash: valueCents=%s; descrição=%s",
+        dados["valueCents"], dados["description"]
+    )
     timeout = aiohttp.ClientTimeout(total=20)
 
-    async with aiohttp.ClientSession(timeout=timeout) as sessao:
-        async with sessao.post(
-            url, headers=headers, json=dados
-        ) as resposta:
-            resultado = await resposta.json(content_type=None)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as sessao:
+            async with sessao.post(
+                url, headers=headers, json=dados
+            ) as resposta:
+                texto = await resposta.text()
+                logger.info("PurinCash respondeu HTTP %s.", resposta.status)
 
-            if resposta.status not in (200, 201):
-                # Não exibe a resposta completa da API no Discord.
-                raise RuntimeError(
-                    f"A PurinCash recusou a cobrança (HTTP {resposta.status})."
-                )
+                if resposta.status not in (200, 201):
+                    # A resposta detalhada fica apenas no console da hospedagem.
+                    logger.error(
+                        "Erro PurinCash HTTP %s; resposta: %s",
+                        resposta.status, texto[:1000]
+                    )
+                    raise RuntimeError(
+                        f"A PurinCash recusou a cobrança (HTTP {resposta.status}). "
+                        "Consulte o console da hospedagem."
+                    )
 
-            if not isinstance(resultado, dict):
-                raise RuntimeError("Resposta inválida da PurinCash.")
+                try:
+                    resultado = await resposta.json(content_type=None)
+                except Exception as erro:
+                    logger.error(
+                        "PurinCash respondeu sucesso, mas não retornou JSON válido: %s",
+                        texto[:500]
+                    )
+                    raise RuntimeError(
+                        "A PurinCash retornou uma resposta inválida."
+                    ) from erro
 
-            return resultado
+    except aiohttp.ClientError as erro:
+        logger.exception("Falha de conexão com a PurinCash.")
+        raise RuntimeError(
+            "Não foi possível conectar à PurinCash. Confira o console."
+        ) from erro
+
+    if not isinstance(resultado, dict):
+        logger.error("Resposta da PurinCash não é um objeto JSON.")
+        raise RuntimeError("Resposta inválida da PurinCash.")
+
+    pix = resultado.get("pix")
+    pix = pix if isinstance(pix, dict) else {}
+    payment_id = resultado.get("paymentId") or resultado.get("id")
+    logger.info(
+        "Resposta PurinCash: campos=%s; possui_id=%s; possui_codigo_pix=%s; status=%s",
+        list(resultado.keys())[:30],
+        bool(payment_id),
+        bool(pix.get("brCode")),
+        resultado.get("status", "não informado")
+    )
+    return resultado
 
 
 def extrair_dados_pix(resultado):
