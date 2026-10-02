@@ -17,6 +17,7 @@ TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0") or 0)
 STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0") or 0)
 MIDLEMAN_ROLE_ID = int(os.getenv("MIDLEMAN_ROLE_ID", "1553573537506394192") or 1553573537506394192)
 MIDLEMAN_CHANNEL_ID = int(os.getenv("MIDLEMAN_CHANNEL_ID", "0") or 0)
+MIDLEMAN_CHANNEL_NAME = os.getenv("MIDLEMAN_CHANNEL_NAME", "mid").strip().lower()
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or 0)
 
 logging.basicConfig(level=logging.INFO)
@@ -201,6 +202,9 @@ class PapeisView(discord.ui.View):
             if isinstance(canal, discord.TextChannel):
                 # Publica o aviso e botão no canal de MID configurado.
                 canal_midleman = interaction.guild.get_channel(MIDLEMAN_CHANNEL_ID) if MIDLEMAN_CHANNEL_ID else None
+                # Se o ID nao foi configurado, procura automaticamente um canal chamado #mid.
+                if not isinstance(canal_midleman, discord.TextChannel):
+                    canal_midleman = discord.utils.get(interaction.guild.text_channels, name=MIDLEMAN_CHANNEL_NAME)
                 if isinstance(canal_midleman, discord.TextChannel):
                     try:
                         await canal_midleman.send(
@@ -211,10 +215,11 @@ class PapeisView(discord.ui.View):
                             ),
                             view=AssumirMidlemanView(self.canal_id),
                         )
-                    except discord.HTTPException:
-                        await canal.send("⚠️ Não consegui avisar o canal privado de Midleman. Avise a equipe.")
+                    except discord.HTTPException as erro:
+                        log.exception("Falha ao publicar o botao no canal MID")
+                        await canal.send(f"⚠️ Não consegui publicar o botão no canal MID ({canal_midleman.mention}). Confira se o bot tem Ver canal e Enviar mensagens. Erro: {type(erro).__name__}.")
                 else:
-                    await canal.send("⚠️ O canal privado de Midleman não está configurado. Configure MIDLEMAN_CHANNEL_ID na FadeHost.")
+                    await canal.send("⚠️ Não encontrei o canal #mid. Crie um canal chamado `mid` ou configure `MIDLEMAN_CHANNEL_ID` na FadeHost.")
                 await canal.send(
                     embed=embed_base("Confirmar valor", "Informe o valor combinado. Os dois participantes terão que confirmar."),
                     view=ProporValorView(self.canal_id),
@@ -470,8 +475,8 @@ async def midajuda(interaction: discord.Interaction):
         embed=embed_base(
             "Ajuda • Lunar MID",
             "Use `/painelmid` (permissão Gerenciar Servidor) para publicar o painel.\n"
-            "Configure `TICKET_CATEGORY_ID`, `STAFF_ROLE_ID`, `MIDLEMAN_ROLE_ID`, `MIDLEMAN_CHANNEL_ID` e `LOG_CHANNEL_ID` na hospedagem. `MIDLEMAN_ROLE_ID` é o ID do cargo; `MIDLEMAN_CHANNEL_ID` é o ID do canal privado visível apenas para Midleman.\n"
-            "Os avisos/botão de assumir mediação são publicados no canal MID configurado por MIDLEMAN_CHANNEL_ID. Tickets recebem nomes sequenciais como mid-001, mid-002, mid-003, conforme os canais MID existentes. O bot não processa pagamentos nem verifica PIX automaticamente nesta versão.",
+            "Configure `TICKET_CATEGORY_ID`, `STAFF_ROLE_ID`, `MIDLEMAN_ROLE_ID`, `MIDLEMAN_CHANNEL_ID` e `LOG_CHANNEL_ID` na hospedagem. `MIDLEMAN_ROLE_ID` é o ID do cargo; `MIDLEMAN_CHANNEL_ID` é opcional se o canal se chamar `mid`.\n"
+            "Após os dois participantes escolherem seus papéis, o bot publica no canal `#mid` (ou no canal definido por MIDLEMAN_CHANNEL_ID) um aviso com o botão de assumir mediação. Tickets recebem nomes sequenciais como mid-001, mid-002, mid-003, conforme os canais MID existentes. O bot não processa pagamentos nem verifica PIX automaticamente nesta versão.",
         ),
         ephemeral=True,
     )
