@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import discord
@@ -125,7 +126,7 @@ class EscolherParticipanteView(discord.ui.View):
         super().__init__(timeout=3600)
         self.criador_id = criador_id
 
-    @discord.ui.user_select(placeholder="Selecionar usuário", min_values=1, max_values=1)
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Selecionar usuário", min_values=1, max_values=1)
     async def selecionar(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         if interaction.user.id != self.criador_id:
             return await interaction.response.send_message("Só quem abriu o ticket pode escolher o participante.", ephemeral=True)
@@ -343,7 +344,7 @@ class EtapasManuaisView(discord.ui.View):
         await interaction.response.send_message("Ticket será fechado em 5 segundos.", ephemeral=True)
         await interaction.channel.send("🔒 Ticket encerrado manualmente. Guarde o histórico da negociação.")
         await registrar(interaction.guild, f"🔒 Ticket encerrado: {interaction.channel.name} por {interaction.user.mention}")
-        await discord.utils.sleep_until(discord.utils.utcnow() + __import__("datetime").timedelta(seconds=5))
+        await discord.utils.sleep_until(discord.utils.utcnow() + timedelta(seconds=5))
         try:
             await interaction.channel.delete(reason=f"Ticket encerrado por {interaction.user}")
         except discord.Forbidden:
