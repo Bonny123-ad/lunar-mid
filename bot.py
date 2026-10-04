@@ -1,975 +1,373 @@
 import os
-import json
+import logging
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional
+
 import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
+import aiosqlite
 
 load_dotenv()
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID", "0")) or None
+ADMIN_ROLE_ID = int(os.getenv("ADMIN_ROLE_ID", "0")) or None
+STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0")) or None
+DATABASE_PATH = os.getenv("DATABASE_PATH", "lunar_org.db")
 
-PREFIX = "!"
+if not TOKEN:
+    raise RuntimeError("Defina DISCORD_TOKEN no arquivo .env.")
 
-# IDs opcionais — coloque 0 se não quiser usar
-CATEGORIA_TICKETS_ID = 0
-CANAL_LOGS_ID = 0
-
-ARQUIVO_DADOS = "dados.json"
-
-# Valores fictícios disponíveis
-VALORES = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-
-MODOS = {
-    "normal": "🎮 AP NORMAL",
-    "full": "🔫 AP FULL UMP + XM8"
-}
-
-
-# ============================================================
-# INTENTS
-# ============================================================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("lunar_org")
 
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True
+intents.guilds = True
 
-bot = commands.Bot(
-    command_prefix=PREFIX,
-    intents=intents
-)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+db: Optional[aiosqlite.Connection] = None
 
-
-# ============================================================
-# BANCO DE DADOS SIMPLES
-# ============================================================
-
-def carregar_dados():
-    if not os.path.exists(ARQUIVO_DADOS):
-        return {
-            "usuarios": {},
-            "partidas": []
-        }
-
-    try:
-        with open(ARQUIVO_DADOS, "r", encoding="utf-8") as arquivo:
-            return json.load(arquivo)
-    except:
-        return {
-            "usuarios": {},
-            "partidas": []
-        }
+PURPLE = 0x7B2CFF
+DARK = 0x17131F
+RED = 0xE5484D
+GREEN = 0x31B77A
 
 
-def salvar_dados(dados):
-    with open(
-        ARQUIVO_DADOS,
-        "w",
-        encoding="utf-8"
-    ) as arquivo:
-        json.dump(
-            dados,
-            arquivo,
-            indent=4,
-            ensure_ascii=False
-        )
+def is_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    ids = {rid for rid in (ADMIN_ROLE_ID, STAFF_ROLE_ID) if rid}
+    return any(role.id in ids for role in member.roles)
 
 
-dados = carregar_dados()
+async def audit(guild: discord.Guild, action: str, actor: str, details: str = ""):
+    channel_id = int(os.getenv("LOG_CHANNEL_ID", "0"))
+    channel = guild.get_channel(channel_id) if channel_id else None
+    if isinstance(channel, discord.TextChannel):
+        embed = discord.Embed(title=f"Registro • {action}", description=details or "—",
+                              color=PURPLE, timestamp=datetime.now(timezone.utc))
+        embed.add_field(name="Responsável", value=actor, inline=True)
+        await channel.send(embed=embed)
 
 
-def criar_usuario(user_id):
+async def init_db():
+    global db
+    db = await aiosqlite.connect(DATABASE_PATH)
+    await db.execute("""CREATE TABLE IF NOT EXISTS applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, user_id INTEGER,
+        game_name TEXT, game_uid TEXT, role TEXT, status TEXT DEFAULT 'Pendente',
+        created_at TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, name TEXT,
+        captain_id INTEGER, roster TEXT DEFAULT '', created_at TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, title TEXT,
+        kind TEXT, description TEXT, created_by INTEGER, created_at TEXT)""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS attendance (
+        event_id INTEGER, user_id INTEGER, status TEXT,
+        PRIMARY KEY(event_id, user_id))""")
+    await db.execute("""CREATE TABLE IF NOT EXISTS sanctions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, user_id INTEGER,
+        moderator_id INTEGER, kind TEXT, reason TEXT, created_at TEXT)""")
+    await db.commit()
 
-    user_id = str(user_id)
 
-    if user_id not in dados["usuarios"]:
-        dados["usuarios"][user_id] = {
-            "saldo": 100,
-            "vitorias": 0,
-            "derrotas": 0,
-            "partidas": 0
-        }
-
-        salvar_dados(dados)
-
-
-def obter_usuario(user_id):
-    criar_usuario(user_id)
-    return dados["usuarios"][str(user_id)]
-
-
-# ============================================================
-# EMBEDS
-# ============================================================
-
-def embed_painel():
-
-    embed = discord.Embed(
-        title="🎯 SALINHAS FREE FIRE",
-        description=(
-            "Escolha o tipo de partida abaixo.\n\n"
-
-            "🎮 **AP NORMAL**\n"
-            "Partida normal.\n\n"
-
-            "🔫 **AP FULL UMP + XM8**\n"
-            "Partida com UMP + XM8.\n\n"
-
-            "💰 Os valores apresentados são "
-            "**créditos fictícios**."
-        ),
-        color=discord.Color.blue()
+def main_embed():
+    e = discord.Embed(
+        title="🌙 LUNAR O.R.G • Central da Organização",
+        description=("Bem-vindo à central oficial da **Lunar O.R.G**.\n"
+                     "Use os painéis abaixo para se recrutar, organizar times e acompanhar os treinos.\n\n"
+                     "🟣 **Tema:** roxo e preto\n"
+                     "⚫ **Conduta:** respeito, fair play e compromisso."),
+        color=PURPLE
     )
-
-    embed.set_footer(
-        text="Sistema de simulação • Sem dinheiro real"
-    )
-
-    return embed
+    e.set_footer(text="Lunar O.R.G • Free Fire")
+    return e
 
 
-# ============================================================
-# BOTÃO DO PAINEL
-# ============================================================
+class RecruitmentModal(discord.ui.Modal, title="Recrutamento • Lunar O.R.G"):
+    nick = discord.ui.TextInput(label="Nick no Free Fire", max_length=32, placeholder="Seu nick")
+    uid = discord.ui.TextInput(label="ID do jogador", max_length=24, placeholder="Seu ID numérico")
+    role = discord.ui.TextInput(label="Função desejada", max_length=40, placeholder="Rush, suporte, IGL...")
+    age = discord.ui.TextInput(label="Idade", max_length=2, placeholder="Idade")
+    availability = discord.ui.TextInput(label="Disponibilidade / experiência", style=discord.TextStyle.paragraph,
+                                        max_length=300, required=False)
 
-class PainelView(discord.ui.View):
+    async def on_submit(self, interaction: discord.Interaction):
+        await db.execute(
+            "INSERT INTO applications (guild_id,user_id,game_name,game_uid,role,status,created_at) VALUES (?,?,?,?,?,?,?)",
+            (interaction.guild_id, interaction.user.id, str(self.nick), str(self.uid), str(self.role),
+             "Pendente", datetime.now(timezone.utc).isoformat()))
+        await db.commit()
+        review_id = int(os.getenv("APPLICATION_CHANNEL_ID", "0"))
+        channel = interaction.guild.get_channel(review_id) if review_id else None
+        if isinstance(channel, discord.TextChannel):
+            e = discord.Embed(title="Nova candidatura • Lunar O.R.G", color=PURPLE)
+            e.add_field(name="Discord", value=interaction.user.mention, inline=True)
+            e.add_field(name="Nick / ID", value=f"{self.nick}\n`{self.uid}`", inline=True)
+            e.add_field(name="Função", value=str(self.role), inline=True)
+            e.add_field(name="Idade", value=str(self.age), inline=True)
+            e.add_field(name="Disponibilidade", value=str(self.availability) or "Não informado", inline=False)
+            await channel.send(embed=e, view=ApplicationReviewView())
+        await audit(interaction.guild, "Candidatura", interaction.user.mention, f"Candidatura enviada: {self.nick}")
+        await interaction.response.send_message("✅ Candidatura enviada para análise da equipe!", ephemeral=True)
 
+
+class ApplicationReviewView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(
-        label="AP NORMAL",
-        emoji="🎮",
-        style=discord.ButtonStyle.primary,
-        custom_id="sim_ap_normal"
-    )
-    async def ap_normal(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
+    @discord.ui.button(label="Aprovar", style=discord.ButtonStyle.success, custom_id="lunar:app:approve")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            return await interaction.response.send_message("Você não tem permissão para revisar candidaturas.", ephemeral=True)
+        await interaction.response.send_message("Candidatura marcada como aprovada. Avise o candidato e atribua os cargos manualmente.", ephemeral=True)
+        if interaction.message and interaction.message.embeds:
+            e = interaction.message.embeds[0]
+            e.color = GREEN
+            e.add_field(name="Revisão", value=f"Aprovada por {interaction.user.mention}", inline=False)
+            await interaction.message.edit(embed=e)
+        await audit(interaction.guild, "Candidatura aprovada", interaction.user.mention)
 
-        await interaction.response.send_message(
-            "🎮 **AP NORMAL**\n\n"
-            "Escolha o valor fictício:",
-            view=ValorView("normal"),
-            ephemeral=True
-        )
-
-    @discord.ui.button(
-        label="AP FULL UMP + XM8",
-        emoji="🔫",
-        style=discord.ButtonStyle.danger,
-        custom_id="sim_ap_full"
-    )
-    async def ap_full(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        await interaction.response.send_message(
-            "🔫 **AP FULL UMP + XM8**\n\n"
-            "Escolha o valor fictício:",
-            view=ValorView("full"),
-            ephemeral=True
-        )
+    @discord.ui.button(label="Recusar", style=discord.ButtonStyle.danger, custom_id="lunar:app:reject")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            return await interaction.response.send_message("Você não tem permissão para revisar candidaturas.", ephemeral=True)
+        await interaction.response.send_message("Candidatura marcada como recusada.", ephemeral=True)
+        if interaction.message and interaction.message.embeds:
+            e = interaction.message.embeds[0]
+            e.color = RED
+            e.add_field(name="Revisão", value=f"Recusada por {interaction.user.mention}", inline=False)
+            await interaction.message.edit(embed=e)
+        await audit(interaction.guild, "Candidatura recusada", interaction.user.mention)
 
 
-# ============================================================
-# SELEÇÃO DE VALOR
-# ============================================================
+class EventModal(discord.ui.Modal, title="Criar evento • Lunar O.R.G"):
+    title_text = discord.ui.TextInput(label="Nome do evento", max_length=80)
+    kind = discord.ui.TextInput(label="Tipo", placeholder="Campeonato ou X-treino", max_length=30)
+    description = discord.ui.TextInput(label="Detalhes / data / horário", style=discord.TextStyle.paragraph, max_length=500)
 
-class ValorSelect(discord.ui.Select):
-
-    def __init__(self, modo):
-
-        self.modo = modo
-
-        options = []
-
-        for valor in VALORES:
-
-            options.append(
-                discord.SelectOption(
-                    label=f"{valor} créditos",
-                    description=f"Entrada fictícia de {valor}",
-                    value=str(valor)
-                )
-            )
-
-        super().__init__(
-            placeholder="Escolha o valor...",
-            options=options,
-            custom_id=f"valor_{modo}"
-        )
-
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        valor = int(self.values[0])
-
-        await criar_ticket(
-            interaction,
-            self.modo,
-            valor
-        )
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            return await interaction.response.send_message("Somente a equipe pode criar eventos.", ephemeral=True)
+        cur = await db.execute(
+            "INSERT INTO events (guild_id,title,kind,description,created_by,created_at) VALUES (?,?,?,?,?,?)",
+            (interaction.guild_id, str(self.title_text), str(self.kind), str(self.description),
+             interaction.user.id, datetime.now(timezone.utc).isoformat()))
+        await db.commit()
+        event_id = cur.lastrowid
+        channel_id = int(os.getenv("EVENT_CHANNEL_ID", "0"))
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
+        if isinstance(channel, discord.TextChannel):
+            e = discord.Embed(title=f"🏆 {self.title_text}", description=str(self.description), color=PURPLE)
+            e.add_field(name="Tipo", value=str(self.kind), inline=True)
+            e.add_field(name="Código", value=f"#{event_id}", inline=True)
+            e.set_footer(text="Clique em Confirmar presença para registrar sua participação.")
+            await channel.send(embed=e, view=AttendanceView(event_id))
+        await interaction.response.send_message(f"Evento criado (#{event_id}).", ephemeral=True)
+        await audit(interaction.guild, "Evento criado", interaction.user.mention, str(self.title_text))
 
 
-class ValorView(discord.ui.View):
-
-    def __init__(self, modo):
-
-        super().__init__(timeout=120)
-
-        self.add_item(
-            ValorSelect(modo)
-        )
-
-
-# ============================================================
-# CRIAR TICKET
-# ============================================================
-
-async def criar_ticket(
-    interaction,
-    modo,
-    valor
-):
-
-    guild = interaction.guild
-    usuario = interaction.user
-
-    # Procura categoria configurada
-    categoria = None
-
-    if CATEGORIA_TICKETS_ID != 0:
-        categoria = guild.get_channel(
-            CATEGORIA_TICKETS_ID
-        )
-
-    # Verifica se já existe ticket
-    for canal in guild.text_channels:
-
-        if canal.name == f"ticket-{usuario.id}":
-
-            await interaction.response.send_message(
-                f"❌ Você já possui um ticket: {canal.mention}",
-                ephemeral=True
-            )
-
-            return
-
-    # Permissões
-    overwrites = {
-
-        guild.default_role:
-            discord.PermissionOverwrite(
-                view_channel=False
-            ),
-
-        usuario:
-            discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-    }
-
-    # Cargos que podem mediar
-    for role in guild.roles:
-
-        nome = role.name.lower()
-
-        if (
-            "mediador" in nome
-            or "staff" in nome
-            or "admin" in nome
-        ):
-
-            overwrites[role] = discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True
-            )
-
-    # Criação do canal
-    canal = await guild.create_text_channel(
-
-        name=f"ticket-{usuario.id}",
-
-        category=categoria,
-
-        overwrites=overwrites
-    )
-
-    # Embed
-    embed = discord.Embed(
-        title="🎫 TICKET DE SALINHA",
-        color=discord.Color.green()
-    )
-
-    embed.add_field(
-        name="👤 Jogador",
-        value=usuario.mention,
-        inline=False
-    )
-
-    embed.add_field(
-        name="🎮 Modo",
-        value=MODOS[modo],
-        inline=False
-    )
-
-    embed.add_field(
-        name="💰 Valor fictício",
-        value=f"**{valor} créditos**",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📊 Status",
-        value="🟡 Aguardando mediador",
-        inline=False
-    )
-
-    embed.set_footer(
-        text="SIMULAÇÃO • Sem dinheiro real"
-    )
-
-    await canal.send(
-        content=usuario.mention,
-        embed=embed,
-        view=TicketView(
-            usuario.id,
-            modo,
-            valor
-        )
-    )
-
-    await interaction.response.send_message(
-        f"✅ Ticket criado: {canal.mention}",
-        ephemeral=True
-    )
-
-
-# ============================================================
-# TICKET
-# ============================================================
-
-class TicketView(discord.ui.View):
-
-    def __init__(
-        self,
-        dono_id,
-        modo,
-        valor
-    ):
-
+class AttendanceView(discord.ui.View):
+    def __init__(self, event_id: int):
         super().__init__(timeout=None)
-
-        self.dono_id = dono_id
-        self.modo = modo
-        self.valor = valor
-
-
-    @discord.ui.button(
-        label="Assumir",
-        emoji="👤",
-        style=discord.ButtonStyle.success,
-        custom_id="ticket_assumir"
-    )
-    async def assumir(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        membro = interaction.user
-
-        pode_assumir = (
-            membro.guild_permissions.administrator
-            or any(
-                "mediador" in role.name.lower()
-                or "staff" in role.name.lower()
-                or "admin" in role.name.lower()
-                for role in membro.roles
-            )
-        )
-
-        if not pode_assumir:
-
-            await interaction.response.send_message(
-                "❌ Você não pode assumir tickets.",
-                ephemeral=True
-            )
-
-            return
-
-        embed = discord.Embed(
-            title="👤 TICKET ASSUMIDO",
-            description=(
-                f"**Mediador:** {membro.mention}\n"
-                f"**Modo:** {MODOS[self.modo]}\n"
-                f"**Valor:** {self.valor} créditos"
-            ),
-            color=discord.Color.green()
-        )
-
-        await interaction.channel.send(
-            embed=embed
-        )
-
-        await interaction.response.send_message(
-            "✅ Você assumiu este ticket.",
-            ephemeral=True
-        )
-
-
-    @discord.ui.button(
-        label="Dados da Sala",
-        emoji="🔑",
-        style=discord.ButtonStyle.primary,
-        custom_id="ticket_sala"
-    )
-    async def dados_sala(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        # Apenas staff/mediador
-        membro = interaction.user
-
-        pode = (
-            membro.guild_permissions.administrator
-            or any(
-                "mediador" in role.name.lower()
-                or "staff" in role.name.lower()
-                or "admin" in role.name.lower()
-                for role in membro.roles
-            )
-        )
-
-        if not pode:
-
-            await interaction.response.send_message(
-                "❌ Apenas mediadores podem enviar os dados.",
-                ephemeral=True
-            )
-
-            return
-
-        await interaction.response.send_modal(
-            SalaModal()
-        )
-
-
-    @discord.ui.button(
-        label="Resultado",
-        emoji="🏆",
-        style=discord.ButtonStyle.secondary,
-        custom_id="ticket_resultado"
-    )
-    async def resultado(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        membro = interaction.user
-
-        pode = (
-            membro.guild_permissions.administrator
-            or any(
-                "mediador" in role.name.lower()
-                or "staff" in role.name.lower()
-                or "admin" in role.name.lower()
-                for role in membro.roles
-            )
-        )
-
-        if not pode:
-
-            await interaction.response.send_message(
-                "❌ Apenas mediadores podem registrar resultados.",
-                ephemeral=True
-            )
-
-            return
-
-        await interaction.response.send_modal(
-            ResultadoModal(
-                self.dono_id,
-                self.valor
-            )
-        )
-
-
-    @discord.ui.button(
-        label="Fechar",
-        emoji="🔒",
-        style=discord.ButtonStyle.danger,
-        custom_id="ticket_fechar"
-    )
-    async def fechar(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        membro = interaction.user
-
-        pode = (
-            membro.guild_permissions.administrator
-            or any(
-                "mediador" in role.name.lower()
-                or "staff" in role.name.lower()
-                or "admin" in role.name.lower()
-                for role in membro.roles
-            )
-        )
-
-        if not pode:
-
-            await interaction.response.send_message(
-                "❌ Apenas a equipe pode fechar.",
-                ephemeral=True
-            )
-
-            return
-
-        await interaction.response.send_message(
-            "🔒 Ticket fechado."
-        )
-
-        await interaction.channel.delete()
-
-
-# ============================================================
-# MODAL DA SALA
-# ============================================================
-
-class SalaModal(discord.ui.Modal):
-
-    def __init__(self):
-
-        super().__init__(
-            title="Dados da Sala"
-        )
-
-        self.codigo = discord.ui.TextInput(
-            label="Código da sala",
-            placeholder="Ex: 123456",
-            max_length=30
-        )
-
-        self.senha = discord.ui.TextInput(
-            label="Senha",
-            placeholder="Ex: 7890",
-            max_length=30
-        )
-
-        self.add_item(self.codigo)
-        self.add_item(self.senha)
-
-
-    async def on_submit(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        embed = discord.Embed(
-            title="🔑 DADOS DA SALA",
-            color=discord.Color.blue()
-        )
-
-        embed.add_field(
-            name="Código",
-            value=f"`{self.codigo.value}`",
-            inline=False
-        )
-
-        embed.add_field(
-            name="Senha",
-            value=f"`{self.senha.value}`",
-            inline=False
-        )
-
-        embed.set_footer(
-            text="Sala criada pelo mediador"
-        )
-
-        await interaction.channel.send(
-            embed=embed
-        )
-
-        await interaction.response.send_message(
-            "✅ Dados enviados.",
-            ephemeral=True
-        )
-
-
-# ============================================================
-# MODAL DE RESULTADO
-# ============================================================
-
-class ResultadoModal(discord.ui.Modal):
-
-    def __init__(
-        self,
-        jogador_id,
-        valor
-    ):
-
-        super().__init__(
-            title="Resultado da Partida"
-        )
-
-        self.jogador_id = jogador_id
-        self.valor = valor
-
-        self.vencedor = discord.ui.TextInput(
-            label="ID do vencedor",
-            placeholder="ID do Discord",
-            max_length=30
-        )
-
-        self.add_item(self.vencedor)
-
-
-    async def on_submit(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        vencedor_id = self.vencedor.value
-
+        self.event_id = event_id
+
+    @discord.ui.button(label="✅ Confirmar presença", style=discord.ButtonStyle.success)
+    async def attend(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await db.execute("INSERT OR REPLACE INTO attendance (event_id,user_id,status) VALUES (?,?,?)",
+                         (self.event_id, interaction.user.id, "Confirmado"))
+        await db.commit()
+        await interaction.response.send_message("Presença confirmada! 🌙", ephemeral=True)
+
+    @discord.ui.button(label="❌ Não vou", style=discord.ButtonStyle.secondary)
+    async def absent(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await db.execute("INSERT OR REPLACE INTO attendance (event_id,user_id,status) VALUES (?,?,?)",
+                         (self.event_id, interaction.user.id, "Ausente"))
+        await db.commit()
+        await interaction.response.send_message("Resposta registrada.", ephemeral=True)
+
+
+class TeamModal(discord.ui.Modal, title="Cadastrar time • Lunar O.R.G"):
+    name = discord.ui.TextInput(label="Nome do time", max_length=50)
+    captain = discord.ui.TextInput(label="Capitão (menção ou nome)", max_length=80)
+    roster = discord.ui.TextInput(label="Line-up (nick dos jogadores)", style=discord.TextStyle.paragraph, max_length=400)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            return await interaction.response.send_message("Somente a equipe pode cadastrar times.", ephemeral=True)
+        await db.execute("INSERT INTO teams (guild_id,name,captain_id,roster,created_at) VALUES (?,?,?,?,?)",
+                         (interaction.guild_id, str(self.name), interaction.user.id, str(self.roster),
+                          datetime.now(timezone.utc).isoformat()))
+        await db.commit()
+        await interaction.response.send_message(f"Time **{self.name}** cadastrado!", ephemeral=True)
+        await audit(interaction.guild, "Time cadastrado", interaction.user.mention, f"{self.name}\n{self.roster}")
+
+
+class SanctionModal(discord.ui.Modal, title="Registrar advertência"):
+    user_id = discord.ui.TextInput(label="ID Discord do jogador", max_length=24)
+    kind = discord.ui.TextInput(label="Tipo", placeholder="Advertência / suspensão", max_length=30)
+    reason = discord.ui.TextInput(label="Motivo", style=discord.TextStyle.paragraph, max_length=500)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            return await interaction.response.send_message("Somente a equipe pode registrar punições.", ephemeral=True)
         try:
-            vencedor_id = int(vencedor_id)
-        except:
+            uid = int(str(self.user_id))
+        except ValueError:
+            return await interaction.response.send_message("O ID precisa ser numérico.", ephemeral=True)
+        await db.execute("INSERT INTO sanctions (guild_id,user_id,moderator_id,kind,reason,created_at) VALUES (?,?,?,?,?,?)",
+                         (interaction.guild_id, uid, interaction.user.id, str(self.kind), str(self.reason),
+                          datetime.now(timezone.utc).isoformat()))
+        await db.commit()
+        await interaction.response.send_message("Registro salvo no banco de dados.", ephemeral=True)
+        await audit(interaction.guild, "Punição registrada", interaction.user.mention,
+                    f"Jogador: <@{uid}>\nTipo: {self.kind}\nMotivo: {self.reason}")
+
+
+class OrgPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📝 Recrutamento", style=discord.ButtonStyle.primary, custom_id="lunar:recruit", row=0)
+    async def recruit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RecruitmentModal())
+
+    @discord.ui.button(label="👥 Times / Line-ups", style=discord.ButtonStyle.secondary, custom_id="lunar:teams", row=0)
+    async def teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cur = await db.execute("SELECT name,captain_id,roster FROM teams WHERE guild_id=? ORDER BY id DESC LIMIT 10",
+                               (interaction.guild_id,))
+        rows = await cur.fetchall()
+        e = discord.Embed(title="👥 Times e line-ups", color=PURPLE)
+        if not rows:
+            e.description = "Nenhum time cadastrado ainda."
+        else:
+            for name, captain, roster in rows:
+                e.add_field(name=name, value=f"Capitão: <@{captain}>\nLine-up: {roster}", inline=False)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="🏆 Campeonatos / X-treinos", style=discord.ButtonStyle.primary, custom_id="lunar:events", row=0)
+    async def events(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cur = await db.execute("SELECT id,title,kind,description FROM events WHERE guild_id=? ORDER BY id DESC LIMIT 8",
+                               (interaction.guild_id,))
+        rows = await cur.fetchall()
+        e = discord.Embed(title="🏆 Campeonatos e X-treinos", color=PURPLE)
+        if not rows:
+            e.description = "Nenhum evento publicado ainda."
+        else:
+            for eid, title, kind, desc in rows:
+                e.add_field(name=f"#{eid} • {title} ({kind})", value=desc, inline=False)
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="📊 Ranking", style=discord.ButtonStyle.secondary, custom_id="lunar:ranking", row=1)
+    async def ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cur = await db.execute("""SELECT user_id, COUNT(*) FROM attendance
+                                  WHERE status='Confirmado' GROUP BY user_id
+                                  ORDER BY COUNT(*) DESC LIMIT 10""")
+        rows = await cur.fetchall()
+        e = discord.Embed(title="📊 Ranking de presença nos treinos", color=PURPLE)
+        e.description = "\n".join(f"**{i}.** <@{uid}> — **{count}** presença(s)" for i, (uid, count) in enumerate(rows, 1)) or "Ainda não há presenças registradas."
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="🗓️ Presença nos treinos", style=discord.ButtonStyle.success, custom_id="lunar:attendance", row=1)
+    async def attendance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cur = await db.execute("SELECT id,title,kind,description FROM events WHERE guild_id=? ORDER BY id DESC LIMIT 5",
+                               (interaction.guild_id,))
+        rows = await cur.fetchall()
+        e = discord.Embed(title="🗓️ Próximos / últimos eventos", color=PURPLE)
+        e.description = "\n".join(f"**#{r[0]} — {r[1]}** · {r[2]}\n{r[3]}" for r in rows) or "Nenhum treino cadastrado."
+        await interaction.response.send_message(embed=e, ephemeral=True)
+
+    @discord.ui.button(label="🛡️ Administração", style=discord.ButtonStyle.danger, custom_id="lunar:admin", row=1)
+    async def admin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+            return await interaction.response.send_message("Painel restrito à equipe autorizada.", ephemeral=True)
+        await interaction.response.send_message("Escolha uma ação:", view=AdminPanel(), ephemeral=True)
+
+
+class AdminPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="➕ Criar campeonato / X-treino", style=discord.ButtonStyle.primary)
+    async def create_event(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EventModal())
+
+    @discord.ui.button(label="👥 Cadastrar time", style=discord.ButtonStyle.secondary)
+    async def create_team(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TeamModal())
+
+    @discord.ui.button(label="⚠️ Registrar advertência", style=discord.ButtonStyle.danger)
+    async def sanction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SanctionModal())
 
-            await interaction.response.send_message(
-                "❌ ID inválido.",
-                ephemeral=True
-            )
-
-            return
-
-        vencedor = interaction.guild.get_member(
-            vencedor_id
-        )
-
-        if vencedor is None:
-
-            await interaction.response.send_message(
-                "❌ Jogador não encontrado no servidor.",
-                ephemeral=True
-            )
-
-            return
-
-        # Atualiza vencedor
-        usuario = obter_usuario(vencedor.id)
-
-        usuario["vitorias"] += 1
-        usuario["partidas"] += 1
-
-        # Atualiza dono do ticket se perdeu
-        if vencedor.id != self.jogador_id:
-
-            perdedor = obter_usuario(
-                self.jogador_id
-            )
-
-            perdedor["derrotas"] += 1
-            perdedor["partidas"] += 1
-
-        salvar_dados(dados)
-
-        embed = discord.Embed(
-            title="🏆 RESULTADO FINAL",
-            description=(
-                f"🥇 **Vencedor:** {vencedor.mention}\n"
-                f"💰 **Valor fictício:** {self.valor} créditos"
-            ),
-            color=discord.Color.gold()
-        )
-
-        await interaction.channel.send(
-            embed=embed
-        )
-
-        await interaction.response.send_message(
-            "✅ Resultado registrado.",
-            ephemeral=True
-        )
-
-
-# ============================================================
-# /PAINEL
-# ============================================================
-
-@bot.tree.command(
-    name="painel",
-    description="Envia o painel das salinhas"
-)
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def painel(
-    interaction: discord.Interaction
-):
-
-    await interaction.channel.send(
-        embed=embed_painel(),
-        view=PainelView()
-    )
-
-    await interaction.response.send_message(
-        "✅ Painel enviado.",
-        ephemeral=True
-    )
-
-
-# ============================================================
-# /SALDO
-# ============================================================
-
-@bot.tree.command(
-    name="saldo",
-    description="Mostra seus créditos fictícios"
-)
-async def saldo(
-    interaction: discord.Interaction
-):
-
-    usuario = obter_usuario(
-        interaction.user.id
-    )
-
-    embed = discord.Embed(
-        title="💰 SEU SALDO",
-        description=(
-            f"👤 {interaction.user.mention}\n\n"
-            f"💰 **{usuario['saldo']} créditos fictícios**"
-        ),
-        color=discord.Color.green()
-    )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
-# ============================================================
-# /RANKING
-# ============================================================
-
-@bot.tree.command(
-    name="ranking",
-    description="Mostra o ranking dos jogadores"
-)
-async def ranking(
-    interaction: discord.Interaction
-):
-
-    lista = []
-
-    for user_id, info in dados["usuarios"].items():
-
-        membro = interaction.guild.get_member(
-            int(user_id)
-        )
-
-        if membro:
-
-            lista.append(
-                (
-                    membro,
-                    info["vitorias"]
-                )
-            )
-
-    lista.sort(
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    texto = ""
-
-    for posicao, (membro, vitorias) in enumerate(
-        lista[:10],
-        start=1
-    ):
-
-        texto += (
-            f"**{posicao}.** "
-            f"{membro.mention} — "
-            f"🏆 {vitorias} vitórias\n"
-        )
-
-    if not texto:
-        texto = "Nenhum jogador no ranking ainda."
-
-    embed = discord.Embed(
-        title="🏆 RANKING",
-        description=texto,
-        color=discord.Color.gold()
-    )
-
-    await interaction.response.send_message(
-        embed=embed
-    )
-
-
-# ============================================================
-# /REGRAS
-# ============================================================
-
-@bot.tree.command(
-    name="regras",
-    description="Mostra as regras"
-)
-async def regras(
-    interaction: discord.Interaction
-):
-
-    embed = discord.Embed(
-        title="📜 REGRAS",
-        description=(
-            "1. Respeite todos os jogadores.\n"
-            "2. Não utilize programas proibidos.\n"
-            "3. Siga o modo escolhido.\n"
-            "4. Respeite o mediador.\n"
-            "5. Envie problemas pelo ticket.\n"
-            "6. Os valores são apenas créditos fictícios.\n"
-            "7. Nenhum crédito possui valor monetário real."
-        ),
-        color=discord.Color.blue()
-    )
-
-    await interaction.response.send_message(
-        embed=embed
-    )
-
-
-# ============================================================
-# /ADICIONAR_CREDITOS
-# ============================================================
-
-@bot.tree.command(
-    name="adicionar_creditos",
-    description="Adiciona créditos fictícios a um jogador"
-)
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def adicionar_creditos(
-    interaction: discord.Interaction,
-    jogador: discord.Member,
-    quantidade: int
-):
-
-    if quantidade <= 0:
-
-        await interaction.response.send_message(
-            "❌ A quantidade precisa ser maior que 0.",
-            ephemeral=True
-        )
-
-        return
-
-    usuario = obter_usuario(
-        jogador.id
-    )
-
-    usuario["saldo"] += quantidade
-
-    salvar_dados(dados)
-
-    await interaction.response.send_message(
-        f"✅ {quantidade} créditos fictícios adicionados a "
-        f"{jogador.mention}."
-    )
-
-
-# ============================================================
-# /RESETAR
-# ============================================================
-
-@bot.tree.command(
-    name="resetar",
-    description="Reseta os dados de um jogador"
-)
-@app_commands.checks.has_permissions(
-    administrator=True
-)
-async def resetar(
-    interaction: discord.Interaction,
-    jogador: discord.Member
-):
-
-    dados["usuarios"][str(jogador.id)] = {
-        "saldo": 100,
-        "vitorias": 0,
-        "derrotas": 0,
-        "partidas": 0
-    }
-
-    salvar_dados(dados)
-
-    await interaction.response.send_message(
-        f"🔄 Dados de {jogador.mention} resetados."
-    )
-
-
-# ============================================================
-# EVENTO READY
-# ============================================================
 
 @bot.event
 async def on_ready():
-
-    # Comandos com botões persistentes
-    bot.add_view(PainelView())
-
-    print(
-        f"✅ Bot conectado como {bot.user}"
-    )
-
-    try:
-
-        synced = await bot.tree.sync()
-
-        print(
-            f"✅ {len(synced)} comandos sincronizados."
-        )
-
-    except Exception as erro:
-
-        print(
-            f"❌ Erro ao sincronizar comandos: {erro}"
-        )
+    if db is None:
+        await init_db()
+    bot.add_view(OrgPanel())
+    bot.add_view(ApplicationReviewView())
+    if GUILD_ID:
+        guild_obj = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild_obj)
+        await bot.tree.sync(guild=guild_obj)
+    else:
+        await bot.tree.sync()
+    log.info("Conectado como %s", bot.user)
 
 
-# ============================================================
-# INICIAR
-# ============================================================
+@bot.event
+async def on_member_join(member: discord.Member):
+    await audit(member.guild, "Entrada", member.mention, f"{member} entrou no servidor.")
 
-if not TOKEN:
 
-    print(
-        "❌ TOKEN não encontrado no arquivo .env"
-    )
+@bot.event
+async def on_member_remove(member: discord.Member):
+    await audit(member.guild, "Saída", str(member), f"{member} saiu do servidor.")
 
-else:
 
-    bot.run(TOKEN)
+@bot.tree.command(name="painel-org", description="Publica o painel principal da Lunar O.R.G.")
+async def panel_command(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+        return await interaction.response.send_message("Somente a equipe autorizada pode publicar o painel.", ephemeral=True)
+    await interaction.channel.send(embed=main_embed(), view=OrgPanel())
+    await interaction.response.send_message("Painel publicado!", ephemeral=True)
+
+
+@bot.tree.command(name="painel-admin", description="Abre o painel administrativo da Lunar O.R.G.")
+async def admin_command(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member) or not is_staff(interaction.user):
+        return await interaction.response.send_message("Acesso negado.", ephemeral=True)
+    await interaction.response.send_message("Painel administrativo:", view=AdminPanel(), ephemeral=True)
+
+
+@bot.tree.command(name="minhas-presencas", description="Mostra suas presenças confirmadas.")
+async def my_attendance(interaction: discord.Interaction):
+    cur = await db.execute("SELECT COUNT(*) FROM attendance WHERE user_id=? AND status='Confirmado'",
+                           (interaction.user.id,))
+    count = (await cur.fetchone())[0]
+    await interaction.response.send_message(f"Você tem **{count}** presença(s) confirmada(s).", ephemeral=True)
+
+
+@bot.tree.command(name="minhas-advertencias", description="Mostra suas advertências registradas.")
+async def my_sanctions(interaction: discord.Interaction):
+    cur = await db.execute("SELECT kind,reason,created_at FROM sanctions WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
+                           (interaction.guild_id, interaction.user.id))
+    rows = await cur.fetchall()
+    e = discord.Embed(title="⚠️ Minhas advertências", color=PURPLE)
+    e.description = "\n".join(f"**{kind}** — {reason} · {date[:10]}" for kind, reason, date in rows) or "Nenhuma advertência registrada."
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+async def main():
+    async with bot:
+        await bot.start(TOKEN)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
