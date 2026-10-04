@@ -1,487 +1,127 @@
-import os
-import logging
-import re
-from datetime import timedelta
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-
 import discord
-from discord import app_commands
 from discord.ext import commands
-from dotenv import load_dotenv
+import asyncio
+import random
 
-load_dotenv()
-
-# Configure these in FadeHost -> Environment Variables.
-TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0") or 0)
-STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID", "0") or 0)
-MIDLEMAN_ROLE_ID = int(os.getenv("MIDLEMAN_ROLE_ID", "1553573537506394192") or 1553573537506394192)
-MIDLEMAN_CHANNEL_ID = int(os.getenv("MIDLEMAN_CHANNEL_ID", "0") or 0)
-MIDLEMAN_CHANNEL_NAME = os.getenv("MIDLEMAN_CHANNEL_NAME", "mid").strip().lower()
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "0") or 0)
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("lunar_mid")
-
+# Configuração de intents
 intents = discord.Intents.default()
-intents.guilds = True
+intents.message_content = True
 intents.members = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Configuração da Chave PIX da sua Organização
+CHAVE_PIX = "sua-chave-pix-aqui@email.com"
+NOME_TITULAR = "Nome do Dono / Organização FF"
 
-def dinheiro(valor: Decimal) -> str:
-    return f"R${valor.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+class FilaModal(discord.ui.Modal, title="Confirmação de Inscrição"):
+    nick_ff = discord.ui.TextInput(
+        label="Seu Nick no Free Fire",
+        placeholder="Ex: LOUD CORINGA",
+        required=True,
+        max_length=50
+    )
+    id_ff = discord.ui.TextInput(
+        label="Seu ID do Free Fire",
+        placeholder="Ex: 123456789",
+        required=True,
+        max_length=20
+    )
 
-
-def calcular_taxa(valor: Decimal, modalidade: str = "produto") -> Decimal:
-    if valor <= Decimal("2.50"):
-        taxa = Decimal("0.00")
-    elif valor <= Decimal("100"):
-        taxa = Decimal("1.20")
-    elif valor <= Decimal("200"):
-        taxa = Decimal("2.50")
-    elif valor <= Decimal("400"):
-        taxa = Decimal("5.00")
-    elif valor <= Decimal("700"):
-        taxa = Decimal("8.00")
-    else:
-        taxa = (valor * Decimal("0.012")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-    if modalidade.lower() == "conta":
-        taxa += (valor * Decimal("0.05")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return taxa.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-
-async def registrar(guild: discord.Guild, mensagem: str):
-    if LOG_CHANNEL_ID:
-        canal = guild.get_channel(LOG_CHANNEL_ID)
-        if isinstance(canal, discord.TextChannel):
-            try:
-                await canal.send(mensagem)
-            except discord.HTTPException:
-                pass
-
-
-def embed_base(titulo: str, descricao: str = "") -> discord.Embed:
-    e = discord.Embed(title=titulo, description=descricao, color=discord.Color.from_rgb(139, 92, 246))
-    e.set_footer(text="Lunar MID • Mediação manual")
-    return e
-
-
-class AbrirTicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Abrir mediação", style=discord.ButtonStyle.primary, emoji="🌙", custom_id="lunar_mid:abrir")
-    async def abrir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("Use este botão dentro do servidor.", ephemeral=True)
-
-        guild = interaction.guild
-        categoria = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
-        if categoria is not None and not isinstance(categoria, discord.CategoryChannel):
-            categoria = None
-
-        # Numeracao sequencial baseada nos tickets MID ja existentes no servidor.
-        numeros_existentes = []
-        for canal_existente in guild.text_channels:
-            correspondencia = re.fullmatch(r"mid-(\d+)", canal_existente.name)
-            if correspondencia:
-                numeros_existentes.append(int(correspondencia.group(1)))
-        numero_ticket = max(numeros_existentes, default=0) + 1
-        nome = f"mid-{numero_ticket:03d}"
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True),
-        }
-        if STAFF_ROLE_ID:
-            cargo = guild.get_role(STAFF_ROLE_ID)
-            if cargo:
-                overwrites[cargo] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
-
-        try:
-            canal = await guild.create_text_channel(
-                name=nome,
-                category=categoria,
-                overwrites=overwrites,
-                topic=f"Lunar MID | responsável: {interaction.user.id} | participante ainda não escolhido",
-                reason="Abertura de ticket Lunar MID",
-            )
-        except discord.Forbidden:
-            return await interaction.response.send_message(
-                "Não tenho permissão para criar canais. Dê ao bot Gerenciar Canais e confira as permissões da categoria.",
-                ephemeral=True,
-            )
-
-        await interaction.response.send_message(f"Seu ticket foi criado: {canal.mention}", ephemeral=True)
-        aviso = embed_base(
-            "Sistema de Mediação",
-            "Pedido de intermediação criado com sucesso!\n\n"
-            "A negociação deve acontecer exclusivamente neste ticket. "
-            "A equipe e o bot nunca pedirão sua senha ou códigos de autenticação.",
-        )
-        aviso.add_field(name="Ticket", value=canal.mention, inline=False)
-        aviso.add_field(
-            name="Notificação de Segurança",
-            value="Confira os dados antes de prosseguir. Não considere um pagamento concluído apenas por prints. "
-                  "A equipe não garante transações feitas fora deste ticket.",
-            inline=False,
-        )
-        await canal.send(content=interaction.user.mention, embed=aviso)
-        await canal.send("**1/5 — Com quem você está negociando?** Selecione a outra pessoa abaixo.", view=EscolherParticipanteView(interaction.user.id))
-        await registrar(guild, f"🌙 Ticket aberto: {canal.mention} por {interaction.user.mention}")
-
-class EscolherParticipanteView(discord.ui.View):
-    def __init__(self, criador_id: int):
-        super().__init__(timeout=3600)
-        self.criador_id = criador_id
-
-    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Selecionar usuário", min_values=1, max_values=1)
-    async def selecionar(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        if interaction.user.id != self.criador_id:
-            return await interaction.response.send_message("Só quem abriu o ticket pode escolher o participante.", ephemeral=True)
-        participante = select.values[0]
-        if participante.id == self.criador_id or participante.bot:
-            return await interaction.response.send_message("Escolha outra pessoa, que não seja você nem um bot.", ephemeral=True)
-        canal = interaction.channel
-        if not isinstance(canal, discord.TextChannel):
-            return await interaction.response.send_message("Canal inválido.", ephemeral=True)
-        try:
-            await canal.set_permissions(participante, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
-            await canal.edit(topic=f"Lunar MID | criador: {self.criador_id} | participante: {participante.id}")
-        except discord.Forbidden:
-            return await interaction.response.send_message("Não consigo atualizar as permissões deste canal.", ephemeral=True)
-
-        estado = EstadoNegociacao(canal.id, self.criador_id, participante.id)
-        ESTADOS[canal.id] = estado
-        await interaction.response.send_message(f"Participante escolhido: {participante.mention}", ephemeral=True)
-        await canal.send(
-            embed=embed_base("Atribuição de Função", "Cada pessoa deve escolher o papel que corresponde à negociação."),
-            view=PapeisView(canal.id),
-        )
-        await registrar(interaction.guild, f"👥 Participantes no ticket {canal.mention}: <@{self.criador_id}> e {participante.mention}")
-
-
-class EstadoNegociacao:
-    def __init__(self, canal_id: int, criador_id: int, participante_id: int):
-        self.canal_id = canal_id
-        self.criador_id = criador_id
-        self.participante_id = participante_id
-        self.papeis: dict[int, str] = {}
-        self.valor: Decimal | None = None
-        self.modalidade = "produto"
-        self.confirmacoes: set[int] = set()
-        self.etapa = "papeis"
-
-
-ESTADOS: dict[int, EstadoNegociacao] = {}
-
-
-def estado_do(interaction: discord.Interaction) -> EstadoNegociacao | None:
-    return ESTADOS.get(interaction.channel_id or 0)
-
-
-class PapeisView(discord.ui.View):
-    def __init__(self, canal_id: int):
-        super().__init__(timeout=86400)
-        self.canal_id = canal_id
-
-    async def escolher(self, interaction: discord.Interaction, papel: str):
-        estado = ESTADOS.get(self.canal_id)
-        if not estado or interaction.user.id not in (estado.criador_id, estado.participante_id):
-            return await interaction.response.send_message("Você não faz parte desta negociação.", ephemeral=True)
-        estado.papeis[interaction.user.id] = papel
-        await interaction.response.send_message(f"Papel registrado: **{papel}**.", ephemeral=True)
-        if estado.criador_id in estado.papeis and estado.participante_id in estado.papeis:
-            if estado.papeis[estado.criador_id] == estado.papeis[estado.participante_id]:
-                estado.papeis.pop(interaction.user.id, None)
-                return await interaction.followup.send("Os participantes precisam escolher papéis diferentes. Escolha novamente.", ephemeral=True)
-            estado.etapa = "valor"
-            canal = interaction.guild.get_channel(estado.canal_id) if interaction.guild else None
-            if isinstance(canal, discord.TextChannel):
-                # Publica o aviso e botão no canal de MID configurado.
-                canal_midleman = interaction.guild.get_channel(MIDLEMAN_CHANNEL_ID) if MIDLEMAN_CHANNEL_ID else None
-                # Se o ID nao foi configurado, procura automaticamente um canal chamado #mid.
-                if not isinstance(canal_midleman, discord.TextChannel):
-                    canal_midleman = discord.utils.get(interaction.guild.text_channels, name=MIDLEMAN_CHANNEL_NAME)
-                if isinstance(canal_midleman, discord.TextChannel):
-                    try:
-                        await canal_midleman.send(
-                            embed=embed_base(
-                                "🛡️ Nova mediação aguardando Midleman",
-                                f"Ticket: {canal.mention}\nParticipantes: <@{estado.criador_id}> e <@{estado.participante_id}>\n\n"
-                                "Somente membros com o cargo Midleman devem usar o botão abaixo."
-                            ),
-                            view=AssumirMidlemanView(self.canal_id),
-                        )
-                    except discord.HTTPException as erro:
-                        log.exception("Falha ao publicar o botao no canal MID")
-                        await canal.send(f"⚠️ Não consegui publicar o botão no canal MID ({canal_midleman.mention}). Confira se o bot tem Ver canal e Enviar mensagens. Erro: {type(erro).__name__}.")
-                else:
-                    await canal.send("⚠️ Não encontrei o canal #mid. Crie um canal chamado `mid` ou configure `MIDLEMAN_CHANNEL_ID` na FadeHost.")
-                await canal.send(
-                    embed=embed_base("Confirmar valor", "Informe o valor combinado. Os dois participantes terão que confirmar."),
-                    view=ProporValorView(self.canal_id),
-                )
-                await registrar(interaction.guild, f"🧭 Papéis definidos no ticket {canal.mention}.")
-
-    @discord.ui.button(label="Enviando", style=discord.ButtonStyle.primary, emoji="📤", custom_id="lunar_mid:enviando")
-    async def enviando(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.escolher(interaction, "Enviando")
-
-    @discord.ui.button(label="Recebendo", style=discord.ButtonStyle.secondary, emoji="📥", custom_id="lunar_mid:recebendo")
-    async def recebendo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.escolher(interaction, "Recebendo")
-
-
-class AssumirMidlemanView(discord.ui.View):
-    def __init__(self, canal_id: int):
-        super().__init__(timeout=86400)
-        self.canal_id = canal_id
-
-    @discord.ui.button(label="Assumir mediação", style=discord.ButtonStyle.primary, emoji="🛡️", custom_id="lunar_mid:assumir_midleman")
-    async def assumir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("Use este botão dentro do servidor.", ephemeral=True)
-        if not MIDLEMAN_ROLE_ID:
-            return await interaction.response.send_message("O cargo ainda não foi configurado. Adicione o ID do cargo em MIDLEMAN_ROLE_ID na FadeHost.", ephemeral=True)
-        cargo = interaction.guild.get_role(MIDLEMAN_ROLE_ID)
-        if cargo is None or cargo not in interaction.user.roles:
-            return await interaction.response.send_message("🔒 Apenas membros com o cargo **Midleman** podem usar este botão.", ephemeral=True)
-        estado = ESTADOS.get(self.canal_id)
-        if not estado:
-            return await interaction.response.send_message("Não encontrei uma negociação ativa neste ticket.", ephemeral=True)
-        canal = interaction.guild.get_channel(self.canal_id)
-        if not isinstance(canal, discord.TextChannel):
-            return await interaction.response.send_message("Canal do ticket não encontrado.", ephemeral=True)
-        await canal.set_permissions(interaction.user, view_channel=True, send_messages=True, read_message_history=True)
-        await interaction.response.send_message("✅ Você assumiu a mediação deste ticket.", ephemeral=True)
-        await canal.send(embed=embed_base("🛡️ Midleman responsável", f"{interaction.user.mention} assumiu a mediação. As etapas e confirmações continuam manuais."))
-        await registrar(interaction.guild, f"🛡️ {interaction.user.mention} assumiu a mediação em {canal.mention}.")
-        button.disabled = True
-        try:
-            await interaction.message.edit(view=self)
-        except discord.HTTPException:
-            pass
-
-
-class ValorModal(discord.ui.Modal, title="Propor valor da negociação"):
-    valor = discord.ui.TextInput(label="Valor combinado (R$)", placeholder="Ex.: 50,00", max_length=15)
-    modalidade = discord.ui.TextInput(label="O que está sendo negociado?", placeholder="Ex.: conta Brawl Stars, skin, gift card...", default="Produto", max_length=60, required=True)
-
-    def __init__(self, canal_id: int):
+    def __init__(self, formato: str, valor: float, regra: str):
         super().__init__()
-        self.canal_id = canal_id
+        self.formato = formato
+        self.valor = valor
+        self.regra = regra
 
     async def on_submit(self, interaction: discord.Interaction):
-        estado = ESTADOS.get(self.canal_id)
-        if not estado or interaction.user.id not in (estado.criador_id, estado.participante_id):
-            return await interaction.response.send_message("Você não faz parte desta negociação.", ephemeral=True)
-        raw = str(self.valor.value).strip().replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".")
-        try:
-            valor = Decimal(raw).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if valor <= 0 or valor > Decimal("1000000"):
-                raise InvalidOperation
-        except (InvalidOperation, ValueError):
-            return await interaction.response.send_message("Digite um valor válido, por exemplo `50,00`.", ephemeral=True)
-        modalidade = " ".join(str(self.modalidade.value).strip().split())
-        if not modalidade:
-            return await interaction.response.send_message("Informe o que está sendo negociado.", ephemeral=True)
-        estado.valor = valor
-        estado.modalidade = modalidade
-        estado.confirmacoes.clear()
-        estado.etapa = "confirmar_valor"
-        taxa = calcular_taxa(valor, modalidade)
-        total = valor + taxa
-        canal = interaction.guild.get_channel(self.canal_id) if interaction.guild else None
-        await interaction.response.send_message("Proposta publicada no ticket. As confirmações anteriores foram zeradas.", ephemeral=True)
-        if isinstance(canal, discord.TextChannel):
-            await canal.send(
-                embed=embed_base(
-                    "Confirmar valor",
-                    f"**Valor proposto:** {dinheiro(valor)}\n"
-                    f"**Taxa estimada:** {dinheiro(taxa)}\n"
-                    f"**Total com taxa:** {dinheiro(total)}\n\n"
-                    f"**Confirmações:** <@{estado.criador_id}> ⏳ • <@{estado.participante_id}> ⏳\n"
-                    "Ambos devem clicar em **Confirmar valor**. Ao confirmar, o ⏳ vira ✅. Editar a proposta reinicia as confirmações.",
-                ),
-                view=ConfirmarValorView(self.canal_id),
-            )
-            await registrar(interaction.guild, f"💰 Proposta de {dinheiro(valor)} no ticket {canal.mention}; aguardando duas confirmações.")
+        guild = interaction.guild
+        member = interaction.user
 
+        # Criar categoria de tickets se não existir (ou usar uma específica)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
 
-class ProporValorView(discord.ui.View):
-    def __init__(self, canal_id: int):
-        super().__init__(timeout=86400)
-        self.canal_id = canal_id
+        # Dar permissão para a staff ver o ticket (substitua 'Cargo Staff' pelo nome do cargo no seu servidor)
+        staff_role = discord.utils.get(guild.roles, name="Staff")
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-    @discord.ui.button(label="Definir valor", style=discord.ButtonStyle.primary, emoji="💵", custom_id="lunar_mid:definir_valor")
-    async def definir(self, interaction: discord.Interaction, button: discord.ui.Button):
-        estado = ESTADOS.get(self.canal_id)
-        if not estado or interaction.user.id not in (estado.criador_id, estado.participante_id):
-            return await interaction.response.send_message("Você não faz parte desta negociação.", ephemeral=True)
-        await interaction.response.send_modal(ValorModal(self.canal_id))
+        # Criar o canal de ticket privado
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{member.name}",
+            overwrites=overwrites,
+            topic=f"Aposta FF - {self.formato} | Valor: R$ {self.valor:.2f} | Jogador: {self.nick_ff.value} ({self.id_ff.value})"
+        )
 
+        # Embed de Cobrança PIX dentro do Ticket
+        embed_pix = discord.Embed(
+            title="💰 Pagamento da Aposta - Free Fire",
+            description=f"Olá **{member.mention}**, você entrou na fila para a modalidade **{self.formato}** com a regra **{self.regra}**.",
+            color=discord.Color.green()
+        )
+        embed_pix.add_field(name="💳 Valor da Inscrição", value=f"`R$ {self.valor:.2f}`", inline=False)
+        embed_pix.add_field(name="📍 Chave PIX (E-mail/Aleatória)", value=f"`{CHAVE_PIX}`\nTitular: {NOME_TITULAR}", inline=False)
+        embed_pix.add_field(name="⚠️ Instruções", value="1. Faça o PIX do valor exato.\n2. Envie o **comprovante em anexo** neste chat.\n3. Aguarde a confirmação da staff para receber a sala e senha.", inline=False)
+        embed_pix.set_footer(text="O canal será fechado após a confirmação.")
 
-class ConfirmarValorView(discord.ui.View):
-    def __init__(self, canal_id: int):
-        super().__init__(timeout=86400)
-        self.canal_id = canal_id
+        await ticket_channel.send(content=f"{member.mention} <@&{staff_role.id}> se necessário!", embed=embed_pix)
 
-    @discord.ui.button(label="Confirmar valor", style=discord.ButtonStyle.success, emoji="✅", custom_id="lunar_mid:confirmar_valor")
-    async def confirmar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        estado = ESTADOS.get(self.canal_id)
-        if not estado or estado.valor is None:
-            return await interaction.response.send_message("Não há uma proposta ativa.", ephemeral=True)
-        if interaction.user.id not in (estado.criador_id, estado.participante_id):
-            return await interaction.response.send_message("Só os participantes podem confirmar.", ephemeral=True)
-        estado.confirmacoes.add(interaction.user.id)
-        await interaction.response.send_message("✅ Sua confirmação foi registrada!", ephemeral=True)
-        canal = interaction.guild.get_channel(self.canal_id) if interaction.guild else None
-        if isinstance(canal, discord.TextChannel) and interaction.message:
-            taxa_atual = calcular_taxa(estado.valor, estado.modalidade)
-            status_a = "✅ Confirmado" if estado.criador_id in estado.confirmacoes else "⏳ Aguardando"
-            status_b = "✅ Confirmado" if estado.participante_id in estado.confirmacoes else "⏳ Aguardando"
-            embed_status = embed_base(
-                "🌙 Lunar MID • Confirmação da proposta",
-                f"**O que está sendo negociado:** {estado.modalidade}\n"
-                f"**Valor combinado:** {dinheiro(estado.valor)}\n"
-                f"**Taxa da mediação:** {dinheiro(taxa_atual)}\n"
-                f"**Total com taxa:** {dinheiro(estado.valor + taxa_atual)}\n\n"
-                f"**{interaction.guild.get_member(estado.criador_id).display_name if interaction.guild.get_member(estado.criador_id) else 'Participante 1'}:** {status_a}\n"
-                f"**{interaction.guild.get_member(estado.participante_id).display_name if interaction.guild.get_member(estado.participante_id) else 'Participante 2'}:** {status_b}\n\n"
-                "A confirmação registra apenas o acordo sobre os valores; não comprova pagamento."
-            )
-            try:
-                await interaction.message.edit(embed=embed_status, view=self)
-            except discord.HTTPException:
-                pass
-        if estado.criador_id in estado.confirmacoes and estado.participante_id in estado.confirmacoes:
-            estado.etapa = "negociacao"
-            canal = interaction.guild.get_channel(self.canal_id) if interaction.guild else None
-            if isinstance(canal, discord.TextChannel):
-                taxa = calcular_taxa(estado.valor, estado.modalidade)
-                await canal.send(
-                    embed=embed_base(
-                        "✅ Valor confirmado pelas duas partes",
-                        f"**O que está sendo negociado:** {estado.modalidade}\n"
-                        f"**Valor:** {dinheiro(estado.valor)}\n**Taxa da mediação:** {dinheiro(taxa)}\n"
-                        f"**Total com taxa:** {dinheiro(estado.valor + taxa)}\n\n"
-                        "✅ As duas partes confirmaram a proposta. Continuem a negociação neste ticket. "
-                        "A confirmação do valor **não significa que houve pagamento**.",
-                    ),
-                    view=EtapasManuaisView(self.canal_id),
-                )
-                await registrar(interaction.guild, f"✅ Valor confirmado pelas duas partes no ticket {canal.mention}.")
-                self.disable_all_items()
-                try:
-                    await interaction.message.edit(view=self)
-                except discord.HTTPException:
-                    pass
+        # Resposta privada para o usuário avisando que o ticket foi aberto
+        await interaction.response.send_message(
+            f"✅ Inscrição realizada com sucesso! Um ticket privado foi aberto para você: {ticket_channel.mention}", 
+            ephemeral=True
+        )
 
-    @discord.ui.button(label="Editar valor", style=discord.ButtonStyle.secondary, emoji="🖊️", custom_id="lunar_mid:editar_valor")
-    async def editar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        estado = ESTADOS.get(self.canal_id)
-        if not estado or interaction.user.id not in (estado.criador_id, estado.participante_id):
-            return await interaction.response.send_message("Só os participantes podem editar a proposta.", ephemeral=True)
-        await interaction.response.send_modal(ValorModal(self.canal_id))
+class SalaView(discord.ui.View):
+    def __init__(self, formato: str, valor: float):
+        super().__init__(timeout=None)
+        self.formato = formato
+        self.valor = valor
 
+    @discord.ui.button(label="Normal", style=discord.ButtonStyle.primary, custom_id="btn_normal")
+    async def btn_normal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = FilaModal(formato=self.formato, valor=self.valor, regra="Normal")
+        await interaction.response.send_modal(modal)
 
-class EtapasManuaisView(discord.ui.View):
-    def __init__(self, canal_id: int):
-        super().__init__(timeout=86400)
-        self.canal_id = canal_id
-
-    async def marcar(self, interaction: discord.Interaction, chave: str, titulo: str):
-        estado = ESTADOS.get(self.canal_id)
-        if not estado or interaction.user.id not in (estado.criador_id, estado.participante_id):
-            return await interaction.response.send_message("Só os participantes podem usar esta etapa.", ephemeral=True)
-        estado.etapa = chave
-        await interaction.response.send_message(f"Etapa registrada manualmente: **{titulo}**. Isso não verifica nem comprova pagamento.", ephemeral=True)
-        canal = interaction.guild.get_channel(self.canal_id) if interaction.guild else None
-        if isinstance(canal, discord.TextChannel):
-            await canal.send(f"📝 {interaction.user.mention} marcou a etapa **{titulo}**. Esta marcação é manual e não comprova pagamento.")
-            await registrar(interaction.guild, f"📝 {titulo} marcado por {interaction.user.mention} em {canal.mention}.")
-
-    @discord.ui.button(label="Dinheiro enviado", style=discord.ButtonStyle.primary, emoji="📤", custom_id="lunar_mid:dinheiro_enviado")
-    async def enviado(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.marcar(interaction, "enviado_manual", "Dinheiro enviado (declaração manual)")
-
-    @discord.ui.button(label="Recebimento confirmado", style=discord.ButtonStyle.success, emoji="📥", custom_id="lunar_mid:recebimento")
-    async def recebido(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.marcar(interaction, "recebido_manual", "Recebimento confirmado (declaração manual)")
-
-    @discord.ui.button(label="Encerrar ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="lunar_mid:encerrar")
-    async def encerrar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not isinstance(interaction.channel, discord.TextChannel):
-            return await interaction.response.send_message("Canal inválido.", ephemeral=True)
-        membro = interaction.user if isinstance(interaction.user, discord.Member) else None
-        permitido = membro and (membro.guild_permissions.manage_channels or interaction.user.id in (
-            ESTADOS.get(self.canal_id).criador_id if ESTADOS.get(self.canal_id) else -1,
-            ESTADOS.get(self.canal_id).participante_id if ESTADOS.get(self.canal_id) else -1,
-        ))
-        if not permitido:
-            return await interaction.response.send_message("Somente os participantes ou a equipe podem encerrar.", ephemeral=True)
-        await interaction.response.send_message("Ticket será fechado em 5 segundos.", ephemeral=True)
-        await interaction.channel.send("🔒 Ticket encerrado manualmente. Guarde o histórico da negociação.")
-        await registrar(interaction.guild, f"🔒 Ticket encerrado: {interaction.channel.name} por {interaction.user.mention}")
-        await discord.utils.sleep_until(discord.utils.utcnow() + timedelta(seconds=5))
-        try:
-            await interaction.channel.delete(reason=f"Ticket encerrado por {interaction.user}")
-        except discord.Forbidden:
-            await interaction.followup.send("Não tenho permissão para excluir o canal. Confira Gerenciar Canais.", ephemeral=True)
-
+    @discord.ui.button(label="Full Ump / Xm8", style=discord.ButtonStyle.danger, custom_id="btn_ump")
+    async def btn_ump(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = FilaModal(formato=self.formato, valor=self.valor, regra="Full Ump / Xm8")
+        await interaction.response.send_modal(modal)
 
 @bot.event
 async def on_ready():
-    log.info("Conectado como %s", bot.user)
+    print(f"Bot conectado como {bot.user} (ID: {bot.user.id})")
+    print("Bot pronto para gerenciar salas de apostas de Free Fire!")
+
+@bot.command(name="criarsala")
+@commands.has_permissions(administrator=True)
+async def criarsala(ctx, formato: str, valor: float):
+    """Comando para a staff criar um painel de sala. Ex: !criarsala "2v2 Mobile" 10.00"""
+    if valor < 0.10 or valor > 100.00:
+        await ctx.send("❌ O valor da aposta deve ser entre **R$ 0,10** e **R$ 100,00**.")
+        return
+
+    embed = discord.Embed(
+        title=f"🔥 SALA DE APOSTA FF - {formato.upper()} 🔥",
+        description="Clique em um dos botões abaixo de acordo com a regra desejada para entrar na fila e abrir seu ticket de pagamento.",
+        color=discord.Color.from_rgb(255, 100, 0)
+    )
+    embed.add_field(name="🎮 Formato", value=formato, inline=True)
+    embed.add_field(name="💵 Valor da Aposta", value=f"R$ {valor:.2f}", inline=True)
+    embed.add_field(name="👥 Status", value="Aguardando jogadores...", inline=False)
+    embed.set_footer(text="Organização de Free Fire • Sistema Automatizado")
+
+    view = SalaView(formato=formato, valor=valor)
+    await ctx.send(embed=embed, view=view)
+    # Deleta a mensagem do comando digitado pela staff para manter o chat limpo
     try:
-        synced = await bot.tree.sync()
-        log.info("Comandos sincronizados: %s", len(synced))
-    except Exception:
-        log.exception("Falha ao sincronizar comandos")
+        await ctx.message.delete()
+    except:
+        pass
 
-
-@bot.tree.command(name="painelmid", description="Publica o painel para abrir uma mediação Lunar MID")
-@app_commands.default_permissions(manage_guild=True)
-async def painelmid(interaction: discord.Interaction):
-    if not interaction.guild:
-        return await interaction.response.send_message("Use este comando dentro de um servidor.", ephemeral=True)
-    embed = embed_base(
-        "🌙 Lunar MID • Sistema de Mediação",
-        "Abra um ticket para iniciar uma negociação com outra pessoa.\n\n"
-        "• Escolha o outro participante\n"
-        "• Definam os papéis e o valor\n"
-        "• Ambos confirmam a proposta\n"
-        "• Sigam as etapas manualmente dentro do ticket\n\n"
-        "**Tabela de taxas da mediação**\n"
-        "• Até R$ 2,50: **R$ 0,00**\n"
-        "• R$ 2,51 a R$ 100,00: **R$ 1,20**\n"
-        "• R$ 100,01 a R$ 200,00: **R$ 2,50**\n"
-        "• R$ 200,01 a R$ 400,00: **R$ 5,00**\n"
-        "• R$ 400,01 a R$ 700,00: **R$ 8,00**\n"
-        "• Acima de R$ 700,00: **1,2% do valor**\n"
-        "• Para negociações identificadas como **conta**, a regra antiga de 5% extra não é mais aplicada automaticamente; o campo aceita qualquer descrição e usa a tabela acima.\n\n"
-        "⚠️ Confirmações manuais não comprovam pagamentos. Não compartilhe senhas, códigos de autenticação ou dados bancários no ticket.",
-    )
-    await interaction.response.send_message("Painel publicado.", ephemeral=True)
-    await interaction.channel.send(embed=embed, view=AbrirTicketView())
-
-
-@bot.tree.command(name="midajuda", description="Mostra as instruções do Lunar MID")
-async def midajuda(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        embed=embed_base(
-            "Ajuda • Lunar MID",
-            "Use `/painelmid` (permissão Gerenciar Servidor) para publicar o painel.\n"
-            "Configure `TICKET_CATEGORY_ID`, `STAFF_ROLE_ID`, `MIDLEMAN_ROLE_ID`, `MIDLEMAN_CHANNEL_ID` e `LOG_CHANNEL_ID` na hospedagem. `MIDLEMAN_ROLE_ID` é o ID do cargo; `MIDLEMAN_CHANNEL_ID` é opcional se o canal se chamar `mid`.\n"
-            "Após os dois participantes escolherem seus papéis, o bot publica no canal `#mid` (ou no canal definido por MIDLEMAN_CHANNEL_ID) um aviso com o botão de assumir mediação. Tickets recebem nomes sequenciais como mid-001, mid-002, mid-003, conforme os canais MID existentes. O bot não processa pagamentos nem verifica PIX automaticamente nesta versão.",
-        ),
-        ephemeral=True,
-    )
-
-
-if not TOKEN:
-    raise RuntimeError("Configure a variável de ambiente DISCORD_TOKEN na FadeHost.")
-bot.run(TOKEN)
+# Insira o token do seu bot do Discord Developer Portal aqui
+bot.run("SEU_TOKEN_DO_BOT_AQUI")
